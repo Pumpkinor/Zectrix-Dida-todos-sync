@@ -1,0 +1,550 @@
+openapi: 3.0.3
+info:
+  title: Zectrix Cloud Open API
+  description: Zectrix 云平台开放接口 - 设备管理与待办事项
+  version: 1.0.0
+
+servers:
+  - url: https://cloud.zectrix.com
+    description: 生产环境
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /open/v1/devices:
+    get:
+      summary: 获取设备列表
+      operationId: getDevices
+      tags:
+        - 设备
+      responses:
+        "200":
+          description: 成功返回设备列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                    example: 0
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Device"
+              example:
+                code: 0
+                data:
+                  - deviceId: "AA:BB:CC:DD:EE:FF"
+                    alias: "我的设备"
+                    board: "bread-compact-wifi"
+
+  /open/v1/todos:
+    get:
+      summary: 获取待办列表
+      operationId: getTodos
+      tags:
+        - 待办
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: "过滤状态：0=待完成, 1=已完成"
+        - name: deviceId
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "设备ID(MAC地址)，过滤指定设备的待办"
+      responses:
+        "200":
+          description: 成功返回待办列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                    example: 0
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Todo"
+              example:
+                code: 0
+                data:
+                  - id: 1
+                    title: "买牛奶"
+                    description: ""
+                    dueDate: "2026-03-20"
+                    dueTime: "09:00"
+                    repeatType: "none"
+                    status: 0
+                    priority: 1
+                    completed: false
+                    deviceId: "AA:BB:CC:DD:EE:FF"
+                    deviceName: "我的设备"
+                    createDate: "2026-03-18 10:00:00"
+                    updateDate: 1742284800
+
+    post:
+      summary: 创建待办
+      operationId: createTodo
+      tags:
+        - 待办
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+              properties:
+                title:
+                  type: string
+                  description: 标题
+                description:
+                  type: string
+                  description: 描述
+                dueDate:
+                  type: string
+                  description: "截止日期(yyyy-MM-dd)"
+                dueTime:
+                  type: string
+                  description: "截止时间(HH:mm)"
+                repeatType:
+                  type: string
+                  enum: [daily, weekly, monthly, yearly, none]
+                  description: "重复类型"
+                repeatWeekday:
+                  type: integer
+                  description: "周几 0-6, 0=周日（weekly用）"
+                repeatMonth:
+                  type: integer
+                  description: "每年几月 1-12（yearly用）"
+                repeatDay:
+                  type: integer
+                  description: "每月几号 1-31（monthly/yearly用）"
+                priority:
+                  type: integer
+                  enum: [0, 1, 2]
+                  description: "优先级：0=普通, 1=重要, 2=紧急"
+                deviceId:
+                  type: string
+                  description: "设备ID(MAC地址)，为空则为个人待办"
+            example:
+              title: "买牛奶"
+              description: ""
+              dueDate: "2026-03-20"
+              dueTime: "09:00"
+              repeatType: "none"
+              priority: 1
+              deviceId: "AA:BB:CC:DD:EE:FF"
+      responses:
+        "200":
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                    example: 0
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      title:
+                        type: string
+                      status:
+                        type: integer
+                      priority:
+                        type: integer
+                      deviceId:
+                        type: string
+                      createDate:
+                        type: string
+              example:
+                code: 0
+                data:
+                  id: 1
+                  title: "买牛奶"
+                  status: 0
+                  priority: 1
+                  deviceId: "AA:BB:CC:DD:EE:FF"
+                  createDate: "2026-03-18 10:00:00"
+
+  /open/v1/todos/{id}:
+    put:
+      summary: 更新待办
+      operationId: updateTodo
+      tags:
+        - 待办
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: 待办ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  description: 标题
+                description:
+                  type: string
+                  description: 描述
+                dueDate:
+                  type: string
+                  description: "截止日期(yyyy-MM-dd)"
+                dueTime:
+                  type: string
+                  description: "截止时间(HH:mm)"
+                priority:
+                  type: integer
+                  enum: [0, 1, 2]
+                  description: "优先级：0=普通, 1=重要, 2=紧急"
+            example:
+              title: "买牛奶和面包"
+      responses:
+        "200":
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                    example: 0
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      title:
+                        type: string
+                      status:
+                        type: integer
+                      priority:
+                        type: integer
+              example:
+                code: 0
+                data:
+                  id: 1
+                  title: "买牛奶和面包"
+                  status: 0
+                  priority: 1
+
+    delete:
+      summary: 删除待办
+      operationId: deleteTodo
+      tags:
+        - 待办
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: 待办ID
+      responses:
+        "200":
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              example:
+                code: 0
+                msg: "success"
+
+  /open/v1/todos/{id}/complete:
+    put:
+      summary: 完成待办
+      operationId: completeTodo
+      tags:
+        - 待办
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: 待办ID
+      responses:
+        "200":
+          description: 操作成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              example:
+                code: 0
+                msg: "success"
+
+  /open/v1/devices/{deviceId}/display/structured-text:
+    post:
+      summary: 推送标题+正文到设备屏幕
+      operationId: pushStructuredText
+      tags:
+        - 设备显示
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备ID(MAC地址)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  maxLength: 200
+                  description: "标题文本(最多200字)，与body至少填一项"
+                body:
+                  type: string
+                  maxLength: 5000
+                  description: "正文内容(最多5000字)，支持换行"
+                pageId:
+                  type: string
+                  description: "页面编号(1-5)，指定后会持久化存储"
+            example:
+              title: "会议提醒"
+              body: "15:00 三楼会议室\n请带笔记本"
+              pageId: "1"
+      responses:
+        "200":
+          description: 推送成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                    example: 0
+                  data:
+                    $ref: "#/components/schemas/DisplayPushResult"
+              example:
+                code: 0
+                data:
+                  totalPages: 1
+                  pushedPages: 1
+                  pageId: "1"
+
+  /open/v1/devices/{deviceId}/display/text:
+    post:
+      summary: 推送纯文本到设备屏幕
+      operationId: pushText
+      tags:
+        - 设备显示
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备ID(MAC地址)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - text
+              properties:
+                text:
+                  type: string
+                  maxLength: 5000
+                  description: "文本内容(最多5000字)，支持换行"
+                fontSize:
+                  type: integer
+                  minimum: 12
+                  maximum: 48
+                  default: 20
+                  description: "字体大小(12-48，默认20)"
+                pageId:
+                  type: string
+                  description: "页面编号(1-5)，指定后会持久化存储"
+            example:
+              text: "今日天气：晴\n温度：25°C"
+              fontSize: 20
+              pageId: "1"
+      responses:
+        "200":
+          description: 推送成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                    example: 0
+                  data:
+                    $ref: "#/components/schemas/DisplayPushResult"
+              example:
+                code: 0
+                data:
+                  totalPages: 1
+                  pushedPages: 1
+                  pageId: "1"
+
+  /open/v1/devices/{deviceId}/display/pages/{pageId}:
+    delete:
+      summary: 删除设备页面
+      operationId: deletePage
+      tags:
+        - 设备显示
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备ID(MAC地址)"
+        - name: pageId
+          in: path
+          required: false
+          schema:
+            type: string
+          description: "页面编号，不传则删除全部页面"
+      responses:
+        "200":
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              example:
+                code: 0
+                msg: "success"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    Device:
+      type: object
+      properties:
+        deviceId:
+          type: string
+          description: "设备ID(MAC地址)"
+          example: "AA:BB:CC:DD:EE:FF"
+        alias:
+          type: string
+          description: 设备别名
+          example: "我的设备"
+        board:
+          type: string
+          description: 设备板型
+          example: "bread-compact-wifi"
+
+    Todo:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 待办ID
+          example: 1
+        title:
+          type: string
+          description: 标题
+          example: "买牛奶"
+        description:
+          type: string
+          description: 描述
+          example: ""
+        dueDate:
+          type: string
+          description: "截止日期(yyyy-MM-dd)"
+          example: "2026-03-20"
+        dueTime:
+          type: string
+          description: "截止时间(HH:mm)"
+          example: "09:00"
+        repeatType:
+          type: string
+          enum: [daily, weekly, monthly, yearly, none]
+          description: 重复类型
+          example: "none"
+        status:
+          type: integer
+          description: "状态：0=待完成, 1=已完成"
+          example: 0
+        priority:
+          type: integer
+          description: "优先级：0=普通, 1=重要, 2=紧急"
+          example: 1
+        completed:
+          type: boolean
+          description: 是否已完成
+          example: false
+        deviceId:
+          type: string
+          description: "关联设备ID(MAC地址)"
+          example: "AA:BB:CC:DD:EE:FF"
+        deviceName:
+          type: string
+          description: 关联设备名称
+          example: "我的设备"
+        createDate:
+          type: string
+          description: 创建时间
+          example: "2026-03-18 10:00:00"
+        updateDate:
+          type: integer
+          description: 更新时间(Unix时间戳)
+          example: 1742284800
+
+    DisplayPushResult:
+      type: object
+      properties:
+        totalPages:
+          type: integer
+          description: 总页数
+          example: 1
+        pushedPages:
+          type: integer
+          description: 已推送页数
+          example: 1
+        pageId:
+          type: string
+          description: 页面编号
+          example: "1"
+
+    MessageResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          description: 状态码
+          example: 0
+        msg:
+          type: string
+          description: 消息
+          example: "success"

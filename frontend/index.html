@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Todo Sync</title>
+    <script src="/assets/vue.global.prod.js"></script>
+    <script src="/assets/tailwindcss.min.js"></script>
+    <style>
+        [v-cloak] { display: none; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="app" v-cloak>
+    <!-- Header -->
+    <header class="bg-white border-b border-gray-200 px-6 py-4">
+        <div class="max-w-5xl mx-auto flex items-center justify-between">
+            <h1 class="text-xl font-bold text-gray-800">Todo Sync</h1>
+            <div class="flex gap-2">
+                <button v-for="tab in tabs" :key="tab.key"
+                    @click="activeTab = tab.key"
+                    :class="['px-4 py-2 rounded-lg text-sm font-medium transition',
+                        activeTab === tab.key ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200']">
+                    {{ tab.label }}
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-5xl mx-auto px-6 py-6">
+        <!-- Todo List Tab -->
+        <div v-if="activeTab === 'todos'">
+            <div class="flex items-center justify-between mb-4">
+                <div class="flex gap-2">
+                    <button v-for="f in ['all','pending','completed']" :key="f"
+                        @click="todoFilter = f; loadTodos()"
+                        :class="['px-3 py-1.5 rounded text-sm',
+                            todoFilter === f ? 'bg-blue-100 text-blue-700 font-medium' : 'text-gray-500 hover:bg-gray-100']">
+                        {{ f === 'all' ? '全部' : f === 'pending' ? '待完成' : '已完成' }}
+                    </button>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-sm text-gray-400">共 {{ todoTotal }} 条</span>
+                    <button @click="manualSync"
+                        :disabled="syncing"
+                        class="px-3 py-1.5 bg-green-600 text-white rounded text-sm font-medium hover:bg-green-700 transition disabled:opacity-50">
+                        {{ syncing ? '同步中...' : '立即同步' }}
+                    </button>
+                </div>
+            </div>
+            <div v-if="todos.length === 0" class="text-center py-12 text-gray-400">
+                <p class="text-lg">暂无待办</p>
+                <p class="text-sm mt-1">点击「同步日志」标签查看同步状态</p>
+            </div>
+            <div v-else class="space-y-2">
+                <div v-for="todo in todos" :key="todo.uid"
+                    class="bg-white rounded-lg border border-gray-200 px-4 py-3 flex items-center gap-3">
+                    <span :class="['w-2 h-2 rounded-full flex-shrink-0',
+                        todo.completed ? 'bg-green-400' : 'bg-blue-400']"></span>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span :class="['text-sm', todo.completed ? 'line-through text-gray-400' : 'text-gray-800']">
+                                {{ todo.title }}
+                            </span>
+                            <span v-if="todo.priority === 2" class="text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded">紧急</span>
+                            <span v-else-if="todo.priority === 1" class="text-xs bg-yellow-100 text-yellow-600 px-1.5 py-0.5 rounded">重要</span>
+                            <span :class="['text-xs px-1.5 py-0.5 rounded',
+                                todo.source === 'zectrix' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600']">
+                                {{ todo.source === 'zectrix' ? 'Zectrix' : '滴答清单' }}
+                            </span>
+                            <span v-if="!todo.synced" class="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded">未同步</span>
+                            <span v-else class="text-xs bg-green-100 text-green-600 px-1.5 py-0.5 rounded">已同步</span>
+                        </div>
+                        <div class="text-xs text-gray-400 mt-0.5">
+                            <span v-if="todo.due_date">{{ todo.due_date }}{{ todo.due_time ? ' ' + todo.due_time : '' }}</span>
+                            <span v-if="todo.description" class="ml-2">{{ todo.description.substring(0, 50) }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div v-if="todoTotal > 20" class="flex justify-center gap-2 mt-4">
+                <button v-for="p in todoPages" :key="p"
+                    @click="todoPage = p; loadTodos()"
+                    :class="['px-3 py-1 rounded text-sm',
+                        todoPage === p ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600']">
+                    {{ p }}
+                </button>
+            </div>
+        </div>
+
+        <!-- Sync Logs Tab -->
+        <div v-if="activeTab === 'logs'">
+            <div v-if="logs.length > 0" class="flex justify-end mb-4">
+                <button @click="clearLogs"
+                    class="px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100 transition">
+                    清空日志
+                </button>
+            </div>
+            <div v-if="logs.length === 0" class="text-center py-12 text-gray-400">
+                <p class="text-lg">暂无同步日志</p>
+            </div>
+            <div v-else class="space-y-2">
+                <div v-for="log in logs" :key="log.id"
+                    class="bg-white rounded-lg border border-gray-200 px-4 py-3">
+                    <div class="flex items-center gap-2">
+                        <span :class="['text-xs px-2 py-0.5 rounded font-medium',
+                            log.status === 'success' ? 'bg-green-100 text-green-700' :
+                            log.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700']">
+                            {{ log.status }}
+                        </span>
+                        <span class="text-sm text-gray-600">{{ log.action }}</span>
+                        <span v-if="log.count" class="text-xs text-gray-400">{{ log.count }} 条</span>
+                        <span class="text-xs text-gray-400 ml-auto">{{ log.created_at }}</span>
+                    </div>
+                    <p v-if="log.detail" class="text-xs text-gray-500 mt-1">{{ log.detail }}</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Config Tab -->
+        <div v-if="activeTab === 'config'">
+            <div class="bg-white rounded-lg border border-gray-200 p-6 space-y-5">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">iCal 订阅地址</label>
+                    <input v-model="config.ical_url" type="text"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="webcal://dida365.com/...">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Zectrix API Key</label>
+                        <input v-model="config.zectrix_api_key" type="password"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="X-API-Key">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">设备 ID (MAC)</label>
+                        <input v-model="config.zectrix_device_id" type="text"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="AA:BB:CC:DD:EE:FF">
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Zectrix API 地址</label>
+                        <input v-model="config.zectrix_base_url" type="text"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="https://cloud.zectrix.com">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">同步频率（分钟）</label>
+                        <input v-model="config.sync_interval_minutes" type="number" min="1"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="5">
+                    </div>
+                </div>
+                <div class="flex items-center justify-between bg-gray-50 rounded-lg px-4 py-3">
+                    <div>
+                        <label class="text-sm font-medium text-gray-700">双向同步</label>
+                        <p class="text-xs text-gray-400 mt-0.5">开启后 Zectrix 侧的变更（完成/修改/删除）会同步回本地</p>
+                    </div>
+                    <button @click="config.bidirectional_enabled = config.bidirectional_enabled === 'true' ? 'false' : 'true'"
+                        :class="['relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
+                            config.bidirectional_enabled === 'true' ? 'bg-blue-600' : 'bg-gray-300']">
+                        <span :class="['inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                            config.bidirectional_enabled === 'true' ? 'translate-x-6' : 'translate-x-1']"></span>
+                    </button>
+                </div>
+
+                <!-- Dida365 API Section -->
+                <div class="border-t border-gray-200 pt-5">
+                    <h3 class="text-sm font-medium text-gray-700 mb-3">滴答清单 API 同步</h3>
+                    <p class="text-xs text-gray-400 mb-3">通过 API 连接后，可精确同步任务完成状态，不再依赖 iCal 订阅。</p>
+                    <div class="flex items-center gap-3">
+                        <button @click="connectDida"
+                            :class="['px-4 py-2 rounded-lg text-sm font-medium transition',
+                                didaConnected ? 'bg-green-100 text-green-700 cursor-default' : 'bg-blue-600 text-white hover:bg-blue-700']">
+                            {{ didaConnected ? '已连接' : '连接滴答清单' }}
+                        </button>
+                        <span v-if="didaStatus" class="text-xs" :class="didaConnected ? 'text-green-600' : 'text-gray-400'">
+                            {{ didaStatus }}
+                        </span>
+                    </div>
+                    <div v-if="didaConnected && didaProjects.length > 0" class="mt-3">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">同步项目</label>
+                        <select v-model="config.dida_project_id"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                            <option v-for="p in didaProjects" :key="p.id" :value="p.id">{{ p.name }}</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Feed URL Section -->
+                <div class="border-t border-gray-200 pt-5">
+                    <h3 class="text-sm font-medium text-gray-700 mb-3">回写滴答清单 - iCal 订阅</h3>
+                    <p class="text-xs text-gray-400 mb-3">生成订阅 URL 后，在滴答清单「设置 → 关联与导入 → URL」中粘贴此链接，即可将所有待办同步到滴答清单。需要公网可访问的地址。</p>
+                    <div class="flex gap-2">
+                        <div class="flex-1 bg-gray-50 rounded-lg px-3 py-2 text-sm text-gray-600 font-mono break-all">
+                            <span v-if="feedUrl">{{ feedUrl }}</span>
+                            <span v-else class="text-gray-400">点击右侧按钮生成订阅链接</span>
+                        </div>
+                        <button @click="generateFeedToken"
+                            class="px-3 py-2 bg-gray-600 text-white rounded-lg text-sm font-medium hover:bg-gray-700 transition whitespace-nowrap">
+                            {{ config.feed_token ? '重新生成' : '生成链接' }}
+                        </button>
+                        <button v-if="feedUrl" @click="copyFeedUrl"
+                            class="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition">
+                            复制
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Email Section -->
+                <div class="border-t border-gray-200 pt-5">
+                    <h3 class="text-sm font-medium text-gray-700 mb-3">回写滴答清单 - 邮件创建任务</h3>
+                    <p class="text-xs text-gray-400 mb-3">配置后，Zectrix 上新建的待办会自动通过邮件发送到滴答清单的任务创建邮箱。</p>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">滴答清单任务邮箱</label>
+                            <input v-model="config.email_to_dida" type="email"
+                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="your-email@dida365.com">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">发件人邮箱</label>
+                            <input v-model="config.email_from" type="email"
+                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="sender@example.com">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-4 mt-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">SMTP 服务器</label>
+                            <input v-model="config.email_smtp_host" type="text"
+                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="smtp.qq.com">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">端口</label>
+                            <input v-model="config.email_smtp_port" type="number"
+                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="465">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">SMTP 用户名</label>
+                            <input v-model="config.email_smtp_user" type="text"
+                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="sender@qq.com">
+                        </div>
+                    </div>
+                    <div class="mt-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">SMTP 密码 / 授权码</label>
+                        <input v-model="config.email_smtp_password" type="password"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="SMTP 授权码">
+                    </div>
+                </div>
+                <div class="flex items-center gap-3 pt-2">
+                    <button @click="saveConfig"
+                        class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition">
+                        保存配置
+                    </button>
+                    <button @click="manualSync"
+                        :disabled="syncing"
+                        class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition disabled:opacity-50">
+                        {{ syncing ? '同步中...' : '手动同步' }}
+                    </button>
+                    <span v-if="configMsg" :class="['text-sm', configMsgOk ? 'text-green-600' : 'text-red-600']">
+                        {{ configMsg }}
+                    </span>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<script>
+const { createApp, ref, reactive, computed, onMounted } = Vue
+
+createApp({
+    setup() {
+        const tabs = [
+            { key: 'todos', label: '待办列表' },
+            { key: 'logs', label: '同步日志' },
+            { key: 'config', label: '配置管理' },
+        ]
+        const activeTab = ref('todos')
+        const syncing = ref(false)
+
+        // Todos
+        const todos = ref([])
+        const todoTotal = ref(0)
+        const todoPage = ref(1)
+        const todoFilter = ref('all')
+        const todoPages = computed(() => Math.ceil(todoTotal.value / 20) || 1)
+
+        async function loadTodos() {
+            const status = todoFilter.value === 'all' ? '' : todoFilter.value
+            const res = await fetch(`/api/todos?status=${status}&page=${todoPage.value}&size=20`)
+            const data = await res.json()
+            todos.value = data.data
+            todoTotal.value = data.total
+        }
+
+        // Logs
+        const logs = ref([])
+        async function loadLogs() {
+            const res = await fetch('/api/logs?page=1&size=50')
+            const data = await res.json()
+            logs.value = data.data
+        }
+
+        async function clearLogs() {
+            if (!confirm('确定要清空所有同步日志吗？')) return
+            await fetch('/api/logs', { method: 'DELETE' })
+            logs.value = []
+        }
+
+        // Config
+        const config = reactive({
+            ical_url: '',
+            zectrix_api_key: '',
+            zectrix_base_url: '',
+            zectrix_device_id: '',
+            sync_interval_minutes: '5',
+            bidirectional_enabled: 'false',
+            feed_token: '',
+            email_smtp_host: '',
+            email_smtp_port: '465',
+            email_smtp_user: '',
+            email_smtp_password: '',
+            email_from: '',
+            email_to_dida: '',
+            dida_client_id: '',
+            dida_client_secret: '',
+            dida_project_id: '',
+        })
+        const didaConnected = ref(false)
+        const didaStatus = ref('')
+        const didaProjects = ref([])
+
+        async function checkDidaStatus() {
+            try {
+                const res = await fetch('/api/dida/status')
+                const data = await res.json()
+                didaConnected.value = data.connected
+                if (data.connected) {
+                    didaStatus.value = '已连接'
+                    didaProjects.value = data.projects || []
+                } else {
+                    didaStatus.value = data.reason || '未连接'
+                    didaProjects.value = []
+                }
+            } catch {
+                didaConnected.value = false
+                didaStatus.value = '检查失败'
+            }
+        }
+
+        function connectDida() {
+            if (didaConnected.value) return
+            window.open('/api/dida/auth', '_blank', 'width=600,height=700')
+            // Poll for connection after giving user time to authorize
+            setTimeout(() => checkDidaStatus(), 5000)
+        }
+        const configMsg = ref('')
+        const configMsgOk = ref(true)
+        const feedUrl = computed(() => {
+            if (!config.feed_token) return ''
+            return `${window.location.origin}/feed/${config.feed_token}.ics`
+        })
+
+        async function generateFeedToken() {
+            const res = await fetch('/api/config/generate-feed-token', { method: 'POST' })
+            const data = await res.json()
+            if (data.ok) {
+                config.feed_token = data.feed_token
+            }
+        }
+
+        async function copyFeedUrl() {
+            try {
+                await navigator.clipboard.writeText(feedUrl.value)
+                configMsgOk.value = true
+                configMsg.value = '已复制到剪贴板'
+                setTimeout(() => configMsg.value = '', 2000)
+            } catch {
+                configMsgOk.value = false
+                configMsg.value = '复制失败'
+            }
+        }
+
+        async function loadConfig() {
+            const res = await fetch('/api/config')
+            const data = await res.json()
+            Object.keys(data).forEach(k => {
+                if (k in config) config[k] = data[k]
+            })
+        }
+
+        async function saveConfig() {
+            const res = await fetch('/api/config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config),
+            })
+            const data = await res.json()
+            configMsgOk.value = data.ok
+            configMsg.value = data.ok ? '配置已保存' : '保存失败'
+            setTimeout(() => configMsg.value = '', 3000)
+        }
+
+        async function manualSync() {
+            syncing.value = true
+            configMsg.value = ''
+            try {
+                await fetch('/api/sync', { method: 'POST' })
+                configMsgOk.value = true
+                configMsg.value = '同步完成'
+                await loadTodos()
+                await loadLogs()
+            } catch {
+                configMsgOk.value = false
+                configMsg.value = '同步失败'
+            } finally {
+                syncing.value = false
+                setTimeout(() => configMsg.value = '', 3000)
+            }
+        }
+
+        onMounted(async () => {
+            await Promise.all([loadTodos(), loadLogs(), loadConfig()])
+            await checkDidaStatus()
+        })
+
+        return {
+            tabs, activeTab, syncing,
+            todos, todoTotal, todoPage, todoFilter, todoPages, loadTodos,
+            logs, clearLogs,
+            config, configMsg, configMsgOk, feedUrl,
+            saveConfig, manualSync, generateFeedToken, copyFeedUrl,
+            didaConnected, didaStatus, didaProjects, connectDida,
+        }
+    }
+}).mount('#app')
+</script>
+</body>
+</html>

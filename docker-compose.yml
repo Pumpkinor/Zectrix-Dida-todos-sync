@@ -1,0 +1,9 @@
+services:
+  todo-sync:
+    build: .
+    container_name: todo-sync
+    ports:
+      - "8100:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
