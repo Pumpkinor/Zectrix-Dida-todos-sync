@@ -38,6 +38,19 @@ async def list_todos(
         await db.close()
 
 
+@router.delete("")
+async def clear_todos():
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT COUNT(*) as total FROM todos")
+        total = (await cursor.fetchone())["total"]
+        await db.execute("DELETE FROM todos")
+        await db.commit()
+        return {"ok": True, "deleted": total}
+    finally:
+        await db.close()
+
+
 @router.get("/{uid}")
 async def get_todo(uid: str):
     db = await get_db()

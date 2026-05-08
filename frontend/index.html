@@ -313,6 +313,10 @@
                         class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition disabled:opacity-50">
                         {{ syncing ? '同步中...' : '手动同步' }}
                     </button>
+                    <button @click="clearTodos"
+                        class="px-4 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100 transition">
+                        清空同步记录
+                    </button>
                     <span v-if="configMsg" :class="['text-sm', configMsgOk ? 'text-green-600' : 'text-red-600']">
                         {{ configMsg }}
                     </span>
@@ -473,6 +477,21 @@ createApp({
             }
         }
 
+        async function clearTodos() {
+            if (!confirm('确定要清空所有已同步的待办记录吗？此操作不可恢复。')) return
+            try {
+                const res = await fetch('/api/todos', { method: 'DELETE' })
+                const data = await res.json()
+                configMsgOk.value = true
+                configMsg.value = `已清空 ${data.deleted} 条记录`
+                await loadTodos()
+            } catch {
+                configMsgOk.value = false
+                configMsg.value = '清空失败'
+            }
+            setTimeout(() => configMsg.value = '', 3000)
+        }
+
         onMounted(async () => {
             await Promise.all([loadTodos(), loadLogs(), loadConfig()])
         })
@@ -482,7 +501,7 @@ createApp({
             todos, todoTotal, todoPage, todoFilter, todoPages, loadTodos,
             logs, clearLogs,
             config, configMsg, configMsgOk, feedUrl,
-            saveConfig, manualSync, generateFeedToken, copyFeedUrl,
+            saveConfig, manualSync, clearTodos, generateFeedToken, copyFeedUrl,
             didaProjects, fetchDidaProjects,
         }
     }
