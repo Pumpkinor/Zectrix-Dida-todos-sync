@@ -28,6 +28,8 @@ class DidaMCPClient:
         if params is not None:
             payload["params"] = params
 
+        logger.debug(f"MCP request: method={method}, params_keys={list(params.keys()) if params else []}")
+
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 MCP_URL,
@@ -35,23 +37,33 @@ class DidaMCPClient:
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json",
-                    "Authorization": f"Bearer {self.token}",
+                    "Authorization": f"Bearer {self.token[:8]}...",
                 },
             )
             resp.raise_for_status()
             data = resp.json()
 
         if "error" in data:
-            raise Exception(f"MCP error: {data['error'].get('message', data['error'])}")
-        return data.get("result", {})
+            err_msg = data['error'].get('message', str(data['error']))
+            logger.error(f"MCP error: method={method}, error={err_msg}")
+            raise Exception(f"MCP error: {err_msg}")
+
+        result = data.get("result", {})
+        logger.debug(f"MCP response: method={method}, result_keys={list(result.keys()) if isinstance(result, dict) else type(result).__name__}")
+        return result
 
     async def _call_tool(self, name: str, arguments: dict) -> str:
+        logger.info(f"MCP tool call: {name}, args={json.dumps(arguments, ensure_ascii=False)[:200]}")
         result = await self._call("tools/call", {"name": name, "arguments": arguments})
         content = result.get("content", [])
+        # MCP returns multiple content items - concatenate all text items
+        texts = []
         for c in content:
             if c.get("type") == "text":
-                return c["text"]
-        return ""
+                texts.append(c["text"])
+        combined = "\n".join(texts)
+        logger.info(f"MCP tool result: {name}, content_items={len(content)}, total_text_len={len(combined)}")
+        return combined
 
     def _parse_ndjson(self, text: str) -> list[dict]:
         """Parse newline-delimited JSON objects from MCP response."""
@@ -81,29 +93,12 @@ class DidaMCPClient:
         })
 
     async def list_projects(self) -> list[dict]:
-        """List all projects including inbox (discovered from tasks)."""
+        """List all projects from Dida365 via MCP."""
         text = await self._call_tool("list_projects", {})
         projects = self._parse_ndjson(text) if text else []
-
-        # Discover inbox project ID from a broad task query
-        known_ids = {p.get("id") for p in projects if p.get("id")}
-        try:
-            filter_text = await self._call_tool("filter_tasks", {
-                "filter": {"status": [0, 2]}
-            })
-            if filter_text:
-                tasks = self._parse_ndjson(filter_text)
-                for t in tasks:
-                    pid = t.get("projectId") or t.get("project_id")
-                    if pid and pid not in known_ids:
-                        projects.append({
-                            "id": pid,
-                            "name": f"收集箱 ({pid})" if pid.startswith("inbox") else pid,
-                        })
-                        known_ids.add(pid)
-        except Exception as e:
-            logger.debug(f"Task-based project discovery failed: {e}")
-
+        logger.info(f"MCP list_projects: got {len(projects)} projects")
+        for p in projects:
+            logger.info(f"  Project: id={p.get('id')}, name={p.get('name')}")
         return projects
 
     async def get_undone_tasks(self, project_id: str) -> list[dict]:
@@ -111,7 +106,9 @@ class DidaMCPClient:
         if not text:
             return []
         data = json.loads(text) if text.strip().startswith('{') else {}
-        return data.get("tasks", [])
+        tasks = data.get("tasks", [])
+        logger.info(f"MCP get_undone_tasks: project={project_id}, count={len(tasks)}")
+        return tasks
 
     async def get_completed_tasks(self, project_ids: list[str], start_date: str, end_date: str) -> list[dict]:
         text = await self._call_tool("list_completed_tasks_by_date", {
@@ -120,9 +117,12 @@ class DidaMCPClient:
             "start_date": start_date,
             "end_date": end_date,
         })
-        return self._parse_ndjson(text) if text else []
+        tasks = self._parse_ndjson(text) if text else []
+        logger.info(f"MCP get_completed_tasks: projects={project_ids}, range={start_date}~{end_date}, count={len(tasks)}")
+        return tasks
 
     async def complete_task(self, project_id: str, task_id: str) -> str:
+        logger.info(f"MCP complete_task: project={project_id}, task={task_id}")
         return await self._call_tool("complete_task", {
             "project_id": project_id,
             "task_id": task_id,
