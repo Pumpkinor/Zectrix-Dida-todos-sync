@@ -19,9 +19,9 @@ async def _get_forwarder() -> ZectrixForwarder | None:
 
 
 async def _use_dida_api() -> bool:
-    """Check if Dida365 MCP is configured."""
-    token = await get_config("dida_mcp_token")
-    return bool(token)
+    """Check if Dida365 MCP mode is selected and configured."""
+    mode = await get_config("dida_sync_mode")
+    return mode == "mcp"
 
 
 async def run_sync():
@@ -394,6 +394,11 @@ async def run_reverse_sync(forwarder, db=None):
 async def _reverse_complete_to_dida(db, local_linked, remote_map) -> int:
     """If a task was completed on Zectrix, also complete it on Dida365 via MCP."""
     from app.services.dida_client import get_dida_mcp_client
+
+    reverse_mode = await get_config("reverse_sync_mode")
+    if reverse_mode != "mcp":
+        logger.info(f"    Reverse sync mode is '{reverse_mode}', skipping MCP completion")
+        return 0
 
     client = await get_dida_mcp_client()
     if not client:

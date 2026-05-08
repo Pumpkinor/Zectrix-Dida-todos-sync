@@ -24,4 +24,6 @@ DEFAULTS = {
     "email_to_dida": "",
     "dida_mcp_token": "dp_cbb81e1b085041cb87a714a03ee5c5fb",
     "dida_project_id": "",
+    "dida_sync_mode": "mcp",
+    "reverse_sync_mode": "mcp",
 }

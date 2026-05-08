@@ -81,8 +81,30 @@ class DidaMCPClient:
         })
 
     async def list_projects(self) -> list[dict]:
+        """List all projects including inbox (discovered from tasks)."""
         text = await self._call_tool("list_projects", {})
-        return self._parse_ndjson(text) if text else []
+        projects = self._parse_ndjson(text) if text else []
+
+        # Discover inbox project ID from a broad task query
+        known_ids = {p.get("id") for p in projects if p.get("id")}
+        try:
+            filter_text = await self._call_tool("filter_tasks", {
+                "filter": {"status": [0, 2]}
+            })
+            if filter_text:
+                tasks = self._parse_ndjson(filter_text)
+                for t in tasks:
+                    pid = t.get("projectId") or t.get("project_id")
+                    if pid and pid not in known_ids:
+                        projects.append({
+                            "id": pid,
+                            "name": f"收集箱 ({pid})" if pid.startswith("inbox") else pid,
+                        })
+                        known_ids.add(pid)
+        except Exception as e:
+            logger.debug(f"Task-based project discovery failed: {e}")
+
+        return projects
 
     async def get_undone_tasks(self, project_id: str) -> list[dict]:
         text = await self._call_tool("get_project_with_undone_tasks", {"project_id": project_id})
