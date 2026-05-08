@@ -37,7 +37,7 @@ class DidaMCPClient:
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json",
-                    "Authorization": f"Bearer {self.token[:8]}...",
+                    "Authorization": f"Bearer {self.token}",
                 },
             )
             resp.raise_for_status()
