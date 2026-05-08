@@ -191,30 +191,39 @@ def _parse_dida_time(d) -> str | None:
 
 
 async def fetch_dida_tasks() -> list[Todo]:
-    """Fetch tasks from Dida365 API. Returns list of Todo with accurate status."""
-    from app.services.dida_client import get_dida_client, get_valid_access_token
+    """Fetch tasks from Dida365 via MCP API. Returns list of Todo with accurate status."""
+    from app.services.dida_client import get_dida_mcp_client
     from app.database import get_config
+    from datetime import date, timedelta
 
-    client = await get_dida_client()
+    client = await get_dida_mcp_client()
     if not client:
-        raise Exception("Dida365 client not configured")
+        raise Exception("Dida365 MCP not configured (missing dida_mcp_token)")
 
-    access_token = await get_valid_access_token()
-    if not access_token:
-        raise Exception("Dida365 not authenticated (no access token)")
+    await client.initialize()
 
     project_id = await get_config("dida_project_id")
     if not project_id:
-        # Default: use inbox or first project
-        projects = await client.list_projects(access_token)
+        projects = await client.list_projects()
         if projects:
             project_id = projects[0]["id"]
             logger.info(f"Using first Dida365 project: {projects[0].get('name', '')} ({project_id})")
         else:
             raise Exception("No Dida365 projects found")
 
-    raw_tasks = await client.get_project_tasks(access_token, project_id)
-    logger.info(f"Dida365 API returned {len(raw_tasks)} tasks from project {project_id}")
+    # Fetch undone tasks
+    undone_tasks = await client.get_undone_tasks(project_id)
+    logger.info(f"Dida365 MCP: {len(undone_tasks)} undone tasks from project {project_id}")
+
+    # Fetch recently completed tasks (last 30 days)
+    today = date.today()
+    start = (today - timedelta(days=30)).isoformat()
+    end = today.isoformat()
+    completed_tasks = await client.get_completed_tasks([project_id], start, end)
+    logger.info(f"Dida365 MCP: {len(completed_tasks)} completed tasks from {start} to {end}")
+
+    raw_tasks = undone_tasks + completed_tasks
+    logger.info(f"Dida365 MCP: {len(raw_tasks)} total tasks")
 
     todos = []
     for t in raw_tasks:

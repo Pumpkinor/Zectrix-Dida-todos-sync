@@ -1,134 +1,138 @@
 import logging
-import time
+import json
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-OAUTH_BASE = "https://dida365.com/oauth"
-API_BASE = "https://api.dida365.com/open/v1"
+MCP_URL = "https://mcp.dida365.com"
 
 
-class DidaClient:
-    def __init__(self, client_id: str, client_secret: str):
-        self.client_id = client_id
-        self.client_secret = client_secret
+class DidaMCPClient:
+    """Dida365 client via MCP (Model Context Protocol) with Bearer Token."""
 
-    def get_auth_url(self, redirect_uri: str) -> str:
-        return (
-            f"{OAUTH_BASE}/authorize"
-            f"?client_id={self.client_id}"
-            f"&response_type=code"
-            f"&scope=tasks:read tasks:write"
-            f"&redirect_uri={redirect_uri}"
-        )
+    def __init__(self, token: str):
+        self.token = token
+        self._req_id = 0
 
-    async def exchange_code(self, code: str, redirect_uri: str) -> dict:
+    def _next_id(self) -> int:
+        self._req_id += 1
+        return self._req_id
+
+    async def _call(self, method: str, params: dict = None) -> dict:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": method,
+        }
+        if params is not None:
+            payload["params"] = params
+
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{OAUTH_BASE}/token",
-                data={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "code": code,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": redirect_uri,
+                MCP_URL,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {self.token}",
                 },
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
 
-    async def refresh_token(self, refresh_token: str, redirect_uri: str) -> dict:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{OAUTH_BASE}/token",
-                data={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "refresh_token": refresh_token,
-                    "grant_type": "refresh_token",
-                    "redirect_uri": redirect_uri,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()
+        if "error" in data:
+            raise Exception(f"MCP error: {data['error'].get('message', data['error'])}")
+        return data.get("result", {})
 
-    async def _request(self, method: str, path: str, access_token: str, json_data=None) -> dict:
-        url = f"{API_BASE}{path}"
-        headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(method, url, headers=headers, json=json_data)
-            resp.raise_for_status()
-            if resp.status_code == 204 or not resp.text:
+    async def _call_tool(self, name: str, arguments: dict) -> str:
+        result = await self._call("tools/call", {"name": name, "arguments": arguments})
+        content = result.get("content", [])
+        for c in content:
+            if c.get("type") == "text":
+                return c["text"]
+        return ""
+
+    def _parse_ndjson(self, text: str) -> list[dict]:
+        """Parse newline-delimited JSON objects from MCP response."""
+        objects = []
+        current = ""
+        depth = 0
+        for char in text:
+            if char == '{':
+                depth += 1
+            if depth > 0:
+                current += char
+            if char == '}':
+                depth -= 1
+                if depth == 0 and current.strip():
+                    try:
+                        objects.append(json.loads(current))
+                    except json.JSONDecodeError:
+                        pass
+                    current = ""
+        return objects
+
+    async def initialize(self) -> dict:
+        return await self._call("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "todo-sync", "version": "1.0"},
+        })
+
+    async def list_projects(self) -> list[dict]:
+        text = await self._call_tool("list_projects", {})
+        return self._parse_ndjson(text) if text else []
+
+    async def get_undone_tasks(self, project_id: str) -> list[dict]:
+        text = await self._call_tool("get_project_with_undone_tasks", {"project_id": project_id})
+        if not text:
+            return []
+        data = json.loads(text) if text.strip().startswith('{') else {}
+        return data.get("tasks", [])
+
+    async def get_completed_tasks(self, project_ids: list[str], start_date: str, end_date: str) -> list[dict]:
+        text = await self._call_tool("list_completed_tasks_by_date", {
+            "search": {},
+            "project_ids": project_ids,
+            "start_date": start_date,
+            "end_date": end_date,
+        })
+        return self._parse_ndjson(text) if text else []
+
+    async def complete_task(self, project_id: str, task_id: str) -> str:
+        return await self._call_tool("complete_task", {
+            "project_id": project_id,
+            "task_id": task_id,
+        })
+
+    async def create_task(self, title: str, project_id: str = None,
+                          content: str = "", due_date: str = None,
+                          priority: int = 0) -> str:
+        args = {"title": title}
+        if project_id:
+            args["project_id"] = project_id
+        if content:
+            args["content"] = content
+        if due_date:
+            args["due_date"] = due_date
+        if priority:
+            args["priority"] = priority
+        return await self._call_tool("create_task", args)
+
+    async def get_task(self, task_id: str) -> dict:
+        text = await self._call_tool("get_task_by_id", {"task_id": task_id})
+        if text:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
                 return {}
-            return resp.json()
-
-    async def list_projects(self, access_token: str) -> list[dict]:
-        return await self._request("GET", "/project", access_token)
-
-    async def get_project_tasks(self, access_token: str, project_id: str) -> list[dict]:
-        data = await self._request("GET", f"/project/{project_id}/data", access_token)
-        return data.get("taskList", []) if isinstance(data, dict) else []
-
-    async def get_task(self, access_token: str, project_id: str, task_id: str) -> dict:
-        return await self._request("GET", f"/project/{project_id}/task/{task_id}", access_token)
-
-    async def create_task(self, access_token: str, task: dict) -> dict:
-        return await self._request("POST", "/task", access_token, json_data=task)
-
-    async def complete_task(self, access_token: str, project_id: str, task_id: str) -> dict:
-        return await self._request("POST", f"/project/{project_id}/task/{task_id}/complete", access_token)
-
-    async def delete_task(self, access_token: str, project_id: str, task_id: str) -> dict:
-        return await self._request("DELETE", f"/project/{project_id}/task/{task_id}", access_token)
+        return {}
 
 
-async def get_dida_client() -> DidaClient | None:
+async def get_dida_mcp_client() -> DidaMCPClient | None:
     from app.database import get_config
-    client_id = await get_config("dida_client_id")
-    client_secret = await get_config("dida_client_secret")
-    if not client_id or not client_secret:
+    token = await get_config("dida_mcp_token")
+    if not token:
         return None
-    return DidaClient(client_id, client_secret)
-
-
-async def get_valid_access_token() -> str | None:
-    """Get a valid access token, refreshing if needed."""
-    from app.database import get_config, set_config
-
-    access_token = await get_config("dida_access_token")
-    refresh_token = await get_config("dida_refresh_token")
-    expires_at = await get_config("dida_token_expires_at")
-
-    if not access_token:
-        return None
-
-    # Check if token is expired (with 5 min buffer)
-    if expires_at:
-        try:
-            if time.time() * 1000 > int(expires_at) - 300000:
-                if not refresh_token:
-                    logger.warning("Dida token expired and no refresh token")
-                    return None
-                client = await get_dida_client()
-                if not client:
-                    return None
-                redirect_uri = await get_config("dida_redirect_uri") or "http://localhost:8000/api/dida/callback"
-                logger.info("Refreshing Dida365 access token...")
-                result = await client.refresh_token(refresh_token, redirect_uri)
-                new_access = result.get("access_token", "")
-                new_refresh = result.get("refresh_token", refresh_token)
-                expires_in = result.get("expires_in", 0)
-                new_expires_at = str(int(time.time() * 1000) + expires_in * 1000) if expires_in else ""
-
-                await set_config("dida_access_token", new_access)
-                await set_config("dida_refresh_token", new_refresh)
-                if new_expires_at:
-                    await set_config("dida_token_expires_at", new_expires_at)
-
-                logger.info("Dida365 token refreshed successfully")
-                return new_access
-        except (ValueError, TypeError):
-            pass
-
-    return access_token
+    return DidaMCPClient(token)

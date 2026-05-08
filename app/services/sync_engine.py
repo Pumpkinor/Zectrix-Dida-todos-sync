@@ -19,10 +19,9 @@ async def _get_forwarder() -> ZectrixForwarder | None:
 
 
 async def _use_dida_api() -> bool:
-    """Check if Dida365 API is configured and authenticated."""
-    access_token = await get_config("dida_access_token")
-    client_id = await get_config("dida_client_id")
-    return bool(access_token and client_id)
+    """Check if Dida365 MCP is configured."""
+    token = await get_config("dida_mcp_token")
+    return bool(token)
 
 
 async def run_sync():
@@ -393,17 +392,18 @@ async def run_reverse_sync(forwarder, db=None):
 
 
 async def _reverse_complete_to_dida(db, local_linked, remote_map) -> int:
-    """If a task was completed on Zectrix, also complete it on Dida365 via API."""
-    from app.services.dida_client import get_dida_client, get_valid_access_token
+    """If a task was completed on Zectrix, also complete it on Dida365 via MCP."""
+    from app.services.dida_client import get_dida_mcp_client
 
-    client = await get_dida_client()
+    client = await get_dida_mcp_client()
     if not client:
-        logger.info("    Dida API not configured, skipping reverse completion")
+        logger.info("    Dida MCP not configured, skipping reverse completion")
         return 0
 
-    access_token = await get_valid_access_token()
-    if not access_token:
-        logger.warning("    Dida API token expired, skipping reverse completion")
+    try:
+        await client.initialize()
+    except Exception as e:
+        logger.warning(f"    Dida MCP init failed: {e}")
         return 0
 
     completed_count = 0
@@ -415,16 +415,17 @@ async def _reverse_complete_to_dida(db, local_linked, remote_map) -> int:
         remote = remote_map[rid]
         zectrix_completed = remote.get("status") == 1 or remote.get("completed") is True
         local_completed = bool(row["completed"])
+        source = row["source"] if "source" in row.keys() else "dida"
 
-        # Task completed on Zectrix but not yet on Dida365
-        if zectrix_completed and not local_completed and row["source"] if "source" in row.keys() else "dida" == "dida":
+        # Task completed on Zectrix but not yet on Dida365 (only for dida-sourced tasks)
+        if zectrix_completed and not local_completed and source == "dida":
             dida_task_id = row["dida_task_id"] if "dida_task_id" in row.keys() else None
             dida_project_id = row["dida_project_id"] if "dida_project_id" in row.keys() else None
 
             if dida_task_id and dida_project_id:
                 try:
-                    logger.info(f"    Completing on Dida365: task_id={dida_task_id}, project_id={dida_project_id}, title={remote.get('title')}")
-                    await client.complete_task(access_token, dida_project_id, dida_task_id)
+                    logger.info(f"    Completing on Dida365 via MCP: task_id={dida_task_id}, project_id={dida_project_id}, title={remote.get('title')}")
+                    await client.complete_task(dida_project_id, dida_task_id)
                     completed_count += 1
                     logger.info(f"    COMPLETED on Dida365: task_id={dida_task_id}")
                 except Exception as e:

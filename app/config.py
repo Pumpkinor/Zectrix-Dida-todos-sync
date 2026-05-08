@@ -22,11 +22,6 @@ DEFAULTS = {
     "email_smtp_password": "",
     "email_from": "",
     "email_to_dida": "",
-    "dida_client_id": "8SyTu2HF5d0vV22kuh",
-    "dida_client_secret": "QsEMYaU6dELmF7Pu2BlaeohPL7VMe61m",
-    "dida_access_token": "",
-    "dida_refresh_token": "",
-    "dida_token_expires_at": "",
-    "dida_redirect_uri": "",
+    "dida_mcp_token": "dp_cbb81e1b085041cb87a714a03ee5c5fb",
     "dida_project_id": "",
 }
