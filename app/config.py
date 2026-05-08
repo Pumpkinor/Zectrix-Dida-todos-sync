@@ -9,7 +9,7 @@ FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DEFAULTS = {
-    "ical_url": "https://dida365.com/pub/calendar/feeds/7imuur6at5j7/basic.ics",
+    "ical_url": "",
     "zectrix_api_key": "",
     "zectrix_base_url": "https://cloud.zectrix.com",
     "zectrix_device_id": "",
@@ -22,7 +22,7 @@ DEFAULTS = {
     "email_smtp_password": "",
     "email_from": "",
     "email_to_dida": "",
-    "dida_mcp_token": "dp_cbb81e1b085041cb87a714a03ee5c5fb",
+    "dida_mcp_token": "",
     "dida_project_id": "",
     "dida_sync_mode": "mcp",
     "reverse_sync_mode": "mcp",

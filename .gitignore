@@ -11,3 +11,7 @@ build/
 venv/
 .claude/
 .omc/
+docs/
+CLAUDE.md
+AGENTS.md
+GEMINI.md
