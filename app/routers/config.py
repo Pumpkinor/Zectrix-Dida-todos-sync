@@ -22,6 +22,10 @@ class ConfigUpdate(BaseModel):
     email_smtp_password: Optional[str] = None
     email_from: Optional[str] = None
     email_to_dida: Optional[str] = None
+    dida_mcp_token: Optional[str] = None
+    dida_project_id: Optional[str] = None
+    dida_sync_mode: Optional[str] = None
+    reverse_sync_mode: Optional[str] = None
 
 
 @router.get("")

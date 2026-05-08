@@ -185,25 +185,24 @@
                             placeholder="dp_xxxxxxxx">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">同步项目</label>
-                        <div class="flex gap-2">
-                            <div class="flex-1">
-                                <input v-model="config.dida_project_id" type="text"
-                                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                    placeholder="留空同步所有项目">
-                            </div>
+                        <div class="flex items-center justify-between mb-1">
+                            <label class="text-sm font-medium text-gray-700">同步项目</label>
                             <button @click="fetchDidaProjects"
-                                class="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition whitespace-nowrap">
+                                class="px-3 py-1 bg-gray-100 text-gray-700 rounded-lg text-xs font-medium hover:bg-gray-200 transition">
                                 获取项目
                             </button>
                         </div>
-                        <div v-if="didaProjects.length > 0" class="mt-1.5">
-                            <select v-model="config.dida_project_id"
-                                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                                <option value="">全部项目</option>
-                                <option v-for="p in didaProjects" :key="p.id" :value="p.id">{{ p.name }}</option>
-                            </select>
+                        <div v-if="didaProjects.length > 0"
+                            class="border border-gray-200 rounded-lg max-h-48 overflow-y-auto">
+                            <label v-for="p in didaProjects" :key="p.id"
+                                class="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0">
+                                <input type="checkbox" :value="p.id" v-model="selectedProjectIds"
+                                    class="accent-blue-600 rounded">
+                                <span class="text-sm text-gray-700">{{ p.name }}</span>
+                            </label>
                         </div>
+                        <p v-else class="text-xs text-gray-400">点击「获取项目」加载项目列表</p>
+                        <p class="text-xs text-gray-400 mt-1">不选择任何项目将同步所有项目</p>
                     </div>
                 </div>
 
@@ -302,6 +301,23 @@
                     </p>
                 </div>
 
+                <!-- 数据清理 -->
+                <h3 class="text-sm font-semibold text-gray-800 border-b border-gray-100 pb-2 pt-3">数据清理</h3>
+                <div class="flex flex-wrap gap-2">
+                    <button @click="clearDidaProject"
+                        class="px-3 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100 transition">
+                        清空滴答清单选中项目
+                    </button>
+                    <button @click="clearZectrix"
+                        class="px-3 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100 transition">
+                        清空 Zectrix
+                    </button>
+                    <button @click="clearLocalTodos"
+                        class="px-3 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100 transition">
+                        清空本地记录
+                    </button>
+                </div>
+
                 <!-- Actions -->
                 <div class="flex items-center gap-3 pt-2 border-t border-gray-100">
                     <button @click="saveConfig"
@@ -312,10 +328,6 @@
                         :disabled="syncing"
                         class="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition disabled:opacity-50">
                         {{ syncing ? '同步中...' : '手动同步' }}
-                    </button>
-                    <button @click="clearTodos"
-                        class="px-4 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100 transition">
-                        清空同步记录
                     </button>
                     <span v-if="configMsg" :class="['text-sm', configMsgOk ? 'text-green-600' : 'text-red-600']">
                         {{ configMsg }}
@@ -388,6 +400,7 @@ createApp({
             reverse_sync_mode: 'mcp',
         })
         const didaProjects = ref([])
+        const selectedProjectIds = ref([])
 
         async function fetchDidaProjects() {
             if (!config.dida_mcp_token) {
@@ -445,13 +458,30 @@ createApp({
             Object.keys(data).forEach(k => {
                 if (k in config) config[k] = data[k]
             })
+            // Restore selected project IDs from comma-separated string
+            if (config.dida_project_id) {
+                selectedProjectIds.value = config.dida_project_id.split(',').map(s => s.trim()).filter(Boolean)
+            }
+            // Auto-fetch projects if MCP mode is configured with a token
+            if (config.dida_sync_mode === 'mcp' && config.dida_mcp_token) {
+                try {
+                    const res = await fetch('/api/dida/projects')
+                    const data = await res.json()
+                    if (data.projects) {
+                        didaProjects.value = data.projects
+                    }
+                } catch (e) {
+                    // silently fail, user can manually fetch
+                }
+            }
         }
 
         async function saveConfig() {
+            const payload = { ...config, dida_project_id: selectedProjectIds.value.join(',') }
             const res = await fetch('/api/config', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config),
+                body: JSON.stringify(payload),
             })
             const data = await res.json()
             configMsgOk.value = data.ok
@@ -477,14 +507,52 @@ createApp({
             }
         }
 
-        async function clearTodos() {
+        async function clearLocalTodos() {
             if (!confirm('确定要清空所有已同步的待办记录吗？此操作不可恢复。')) return
             try {
                 const res = await fetch('/api/todos', { method: 'DELETE' })
                 const data = await res.json()
                 configMsgOk.value = true
-                configMsg.value = `已清空 ${data.deleted} 条记录`
+                configMsg.value = `已清空 ${data.deleted} 条本地记录`
                 await loadTodos()
+            } catch {
+                configMsgOk.value = false
+                configMsg.value = '清空失败'
+            }
+            setTimeout(() => configMsg.value = '', 3000)
+        }
+
+        async function clearDidaProject() {
+            if (!confirm('确定要清空滴答清单选中项目中的所有任务吗？此操作会在远端删除任务。')) return
+            try {
+                const res = await fetch('/api/todos/dida-project', { method: 'DELETE' })
+                const data = await res.json()
+                if (data.error) {
+                    configMsgOk.value = false
+                    configMsg.value = data.error
+                } else {
+                    configMsgOk.value = true
+                    configMsg.value = `已清空滴答清单 ${data.deleted} 个任务`
+                }
+            } catch {
+                configMsgOk.value = false
+                configMsg.value = '清空失败'
+            }
+            setTimeout(() => configMsg.value = '', 3000)
+        }
+
+        async function clearZectrix() {
+            if (!confirm('确定要清空 Zectrix 设备上的所有任务吗？')) return
+            try {
+                const res = await fetch('/api/todos/zectrix', { method: 'DELETE' })
+                const data = await res.json()
+                if (data.error) {
+                    configMsgOk.value = false
+                    configMsg.value = data.error
+                } else {
+                    configMsgOk.value = true
+                    configMsg.value = `已清空 Zectrix ${data.deleted} 个任务`
+                }
             } catch {
                 configMsgOk.value = false
                 configMsg.value = '清空失败'
@@ -501,8 +569,8 @@ createApp({
             todos, todoTotal, todoPage, todoFilter, todoPages, loadTodos,
             logs, clearLogs,
             config, configMsg, configMsgOk, feedUrl,
-            saveConfig, manualSync, clearTodos, generateFeedToken, copyFeedUrl,
-            didaProjects, fetchDidaProjects,
+            saveConfig, manualSync, clearLocalTodos, clearDidaProject, clearZectrix, generateFeedToken, copyFeedUrl,
+            didaProjects, selectedProjectIds, fetchDidaProjects,
         }
     }
 }).mount('#app')

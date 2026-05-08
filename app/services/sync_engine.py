@@ -71,7 +71,7 @@ async def run_sync():
             dida_task_id = getattr(todo, '_dida_task_id', None)
             dida_project_id = getattr(todo, '_dida_project_id', None)
 
-            cursor = await db.execute("SELECT uid, last_modified, synced, remote_id FROM todos WHERE uid = ?", (todo.uid,))
+            cursor = await db.execute("SELECT uid, last_modified, synced, remote_id, completed FROM todos WHERE uid = ?", (todo.uid,))
             existing = await cursor.fetchone()
 
             if existing is None:
@@ -178,7 +178,14 @@ async def run_sync():
                             logger.info(f"  COMPLETE on Zectrix: uid={row['uid']}, remote_id={remote_id}, title={title}")
                             await forwarder.complete_todo(remote_id)
                         else:
-                            logger.info(f"  COMPLETE local only (no remote_id): uid={row['uid']}, title={title}")
+                            # Create on Zectrix then complete
+                            logger.info(f"  CREATE+COMPLETE on Zectrix: uid={row['uid']}, title={title}")
+                            rid = await forwarder.create_todo(_row_to_todo(row))
+                            await forwarder.complete_todo(rid)
+                            await db.execute(
+                                "UPDATE todos SET remote_id=? WHERE uid=?",
+                                (rid, row["uid"]),
+                            )
                         await db.execute(
                             "UPDATE todos SET synced=1, synced_at=datetime('now','localtime') WHERE uid=?",
                             (row["uid"],),
@@ -231,6 +238,9 @@ async def run_sync():
 
 def _is_updated(existing_row, remote_todo) -> bool:
     if existing_row["synced"] == 0:
+        return True
+    # Detect completion status change
+    if bool(existing_row["completed"]) != remote_todo.completed:
         return True
     existing_lm = existing_row["last_modified"]
     if existing_lm is None and remote_todo.last_modified is not None:
@@ -372,11 +382,16 @@ async def run_reverse_sync(forwarder, db=None):
         dida_completed = await _reverse_complete_to_dida(db, local_linked, remote_map)
         logger.info(f"  [Phase 5] DONE: {dida_completed} tasks completed on Dida365")
 
-        logger.info(f"── Step 5 DONE: {updated} updated, {created} new, {deleted} deleted, {dida_completed} dida-completed ──")
+        # ── Phase 6: Create Zectrix-originated tasks on Dida365 ──
+        logger.info("  [Phase 6] Create Zectrix tasks on Dida365...")
+        dida_created = await _reverse_create_to_dida(db)
+        logger.info(f"  [Phase 6] DONE: {dida_created} tasks created on Dida365")
+
+        logger.info(f"── Step 5 DONE: {updated} updated, {created} new, {deleted} deleted, {dida_completed} dida-completed, {dida_created} dida-created ──")
         await add_sync_log(
             "reverse_sync",
             "success",
-            f"Reverse sync: {updated} updated, {created} new, {deleted} deleted, {dida_completed} dida-completed",
+            f"Reverse sync: {updated} updated, {created} new, {deleted} deleted, {dida_completed} dida-completed, {dida_created} dida-created",
             updated + created + deleted,
         )
     except Exception as e:
@@ -437,3 +452,77 @@ async def _reverse_complete_to_dida(db, local_linked, remote_map) -> int:
                     logger.error(f"    Failed to complete on Dida365: task_id={dida_task_id}, error={e}")
 
     return completed_count
+
+
+async def _reverse_create_to_dida(db) -> int:
+    """Create Zectrix-originated tasks on Dida365 that don't yet have a dida_task_id."""
+    from app.services.dida_client import get_dida_mcp_client
+
+    reverse_mode = await get_config("reverse_sync_mode")
+    if reverse_mode != "mcp":
+        logger.info(f"    Reverse sync mode is '{reverse_mode}', skipping MCP creation")
+        return 0
+
+    client = await get_dida_mcp_client()
+    if not client:
+        logger.info("    Dida MCP not configured, skipping reverse creation")
+        return 0
+
+    try:
+        await client.initialize()
+    except Exception as e:
+        logger.warning(f"    Dida MCP init failed: {e}")
+        return 0
+
+    project_id_raw = await get_config("dida_project_id")
+    project_ids = [p.strip() for p in project_id_raw.split(",") if p.strip()] if project_id_raw else []
+    if not project_ids:
+        logger.info("    No Dida365 project selected, skipping reverse creation")
+        return 0
+    target_project = project_ids[0]
+
+    cursor = await db.execute(
+        "SELECT uid, title, description, due_date, priority, completed FROM todos WHERE source = 'zectrix' AND dida_task_id IS NULL"
+    )
+    zectrix_tasks = await cursor.fetchall()
+    logger.info(f"    Found {len(zectrix_tasks)} Zectrix tasks without dida_task_id")
+
+    created_count = 0
+    for row in zectrix_tasks:
+        title = row["title"]
+        if not title:
+            continue
+        try:
+            result = await client.create_task(
+                title=title,
+                project_id=target_project,
+                content=row["description"] or "",
+                due_date=row["due_date"],
+                priority=row["priority"] or 0,
+            )
+            # Parse the created task ID from MCP response
+            import json
+            task_data = json.loads(result) if result.strip().startswith("{") else {}
+            dida_task_id = task_data.get("id")
+            if dida_task_id:
+                await db.execute(
+                    "UPDATE todos SET dida_task_id=?, dida_project_id=? WHERE uid=?",
+                    (dida_task_id, target_project, row["uid"]),
+                )
+                await db.commit()
+                logger.info(f"    CREATED on Dida365: title={title}, task_id={dida_task_id}")
+                # If the task is completed on Zectrix, also complete it on Dida365
+                if row["completed"]:
+                    try:
+                        await client.complete_task(target_project, dida_task_id)
+                        logger.info(f"    COMPLETED on Dida365: title={title}, task_id={dida_task_id}")
+                    except Exception as e:
+                        logger.warning(f"    Failed to complete on Dida365: title={title}, error={e}")
+                created_count += 1
+            else:
+                logger.warning(f"    Created on Dida365 but no task_id returned: title={title}, result={result[:200]}")
+                created_count += 1
+        except Exception as e:
+            logger.error(f"    Failed to create on Dida365: title={title}, error={e}")
+
+    return created_count

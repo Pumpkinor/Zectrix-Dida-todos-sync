@@ -131,16 +131,16 @@ class DidaMCPClient:
     async def create_task(self, title: str, project_id: str = None,
                           content: str = "", due_date: str = None,
                           priority: int = 0) -> str:
-        args = {"title": title}
+        task = {"title": title}
         if project_id:
-            args["project_id"] = project_id
+            task["projectId"] = project_id
         if content:
-            args["content"] = content
+            task["content"] = content
         if due_date:
-            args["due_date"] = due_date
+            task["dueDate"] = due_date
         if priority:
-            args["priority"] = priority
-        return await self._call_tool("create_task", args)
+            task["priority"] = priority
+        return await self._call_tool("create_task", {"task": task})
 
     async def get_task(self, task_id: str) -> dict:
         text = await self._call_tool("get_task_by_id", {"task_id": task_id})

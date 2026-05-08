@@ -202,28 +202,36 @@ async def fetch_dida_tasks() -> list[Todo]:
 
     await client.initialize()
 
-    project_id = await get_config("dida_project_id")
-    if not project_id:
+    project_id_raw = await get_config("dida_project_id")
+    project_ids = [p.strip() for p in project_id_raw.split(",") if p.strip()] if project_id_raw else []
+
+    if not project_ids:
         projects = await client.list_projects()
         if projects:
-            project_id = projects[0]["id"]
-            logger.info(f"Using first Dida365 project: {projects[0].get('name', '')} ({project_id})")
+            project_ids = [p["id"] for p in projects]
+            logger.info(f"No project selected, using all {len(project_ids)} projects")
         else:
             raise Exception("No Dida365 projects found")
 
-    # Fetch undone tasks
-    undone_tasks = await client.get_undone_tasks(project_id)
-    logger.info(f"Dida365 MCP: {len(undone_tasks)} undone tasks from project {project_id}")
+    logger.info(f"Fetching from Dida365 projects: {project_ids}")
 
-    # Fetch recently completed tasks (last 30 days)
+    all_raw = []
     today = date.today()
     start = (today - timedelta(days=30)).isoformat()
     end = today.isoformat()
-    completed_tasks = await client.get_completed_tasks([project_id], start, end)
-    logger.info(f"Dida365 MCP: {len(completed_tasks)} completed tasks from {start} to {end}")
+    project_id_set = set(project_ids)
 
-    raw_tasks = undone_tasks + completed_tasks
-    logger.info(f"Dida365 MCP: {len(raw_tasks)} total tasks")
+    for pid in project_ids:
+        undone = await client.get_undone_tasks(pid)
+        completed = await client.get_completed_tasks([pid], start, end)
+        combined = undone + completed
+        # MCP may return tasks from other projects — filter strictly
+        combined = [t for t in combined if t.get("projectId") in project_id_set or t.get("project_id") in project_id_set]
+        logger.info(f"  Project {pid}: {len(undone)} undone + {len(completed)} completed = {len(combined)} after filter")
+        all_raw.extend(combined)
+
+    raw_tasks = all_raw
+    logger.info(f"Dida365 MCP: {len(raw_tasks)} total tasks from {len(project_ids)} projects")
 
     todos = []
     for t in raw_tasks:
@@ -245,7 +253,7 @@ async def fetch_dida_tasks() -> list[Todo]:
         )
         # Store original Dida365 IDs for reverse operations
         todo._dida_task_id = t["id"]
-        todo._dida_project_id = t.get("projectId", project_id)
+        todo._dida_project_id = t.get("projectId") or t.get("project_id") or project_ids[0]
         todos.append(todo)
 
     return todos
