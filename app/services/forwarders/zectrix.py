@@ -8,6 +8,25 @@ from app.services.forwarders.base import BaseForwarder
 
 logger = logging.getLogger(__name__)
 
+# Map Dida365 RRULE FREQ to Zectrix repeatType
+_REPEAT_MAP = {
+    "DAILY": "daily",
+    "WEEKLY": "weekly",
+    "MONTHLY": "monthly",
+    "YEARLY": "yearly",
+}
+
+
+def _dida_repeat_to_zectrix(repeat_flag: str) -> str:
+    """Extract repeatType from Dida365 repeatFlag (RRULE/ERULE string)."""
+    if not repeat_flag:
+        return "none"
+    upper = repeat_flag.upper()
+    for key, val in _REPEAT_MAP.items():
+        if f"FREQ={key}" in upper:
+            return val
+    return "none"
+
 
 class ZectrixForwarder(BaseForwarder):
     def __init__(self, api_key: str, device_id: str, base_url: str = "https://cloud.zectrix.com"):
@@ -31,12 +50,13 @@ class ZectrixForwarder(BaseForwarder):
             return response.json()
 
     async def create_todo(self, todo: Todo) -> str:
+        repeat_type = _dida_repeat_to_zectrix(todo.repeat_flag)
         body = {
             "title": todo.title,
             "description": todo.description or "",
             "priority": todo.priority,
             "deviceId": self.device_id,
-            "repeatType": "none",
+            "repeatType": repeat_type,
         }
         if todo.due_date:
             body["dueDate"] = todo.due_date
@@ -49,10 +69,12 @@ class ZectrixForwarder(BaseForwarder):
         return remote_id
 
     async def update_todo(self, remote_id: str, todo: Todo):
+        repeat_type = _dida_repeat_to_zectrix(todo.repeat_flag)
         body = {
             "title": todo.title,
             "description": todo.description or "",
             "priority": todo.priority,
+            "repeatType": repeat_type,
         }
         if todo.due_date:
             body["dueDate"] = todo.due_date

@@ -130,7 +130,8 @@ class DidaMCPClient:
 
     async def create_task(self, title: str, project_id: str = None,
                           content: str = "", due_date: str = None,
-                          priority: int = 0) -> str:
+                          priority: int = 0, reminders: str = "",
+                          repeat_flag: str = "") -> str:
         task = {"title": title}
         if project_id:
             task["projectId"] = project_id
@@ -140,6 +141,14 @@ class DidaMCPClient:
             task["dueDate"] = due_date
         if priority:
             task["priority"] = priority
+        if reminders:
+            import json
+            try:
+                task["reminders"] = json.loads(reminders)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        if repeat_flag:
+            task["repeatFlag"] = repeat_flag
         return await self._call_tool("create_task", {"task": task})
 
     async def get_task(self, task_id: str) -> dict:

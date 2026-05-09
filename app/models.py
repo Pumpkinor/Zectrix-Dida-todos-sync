@@ -19,6 +19,8 @@ class Todo:
     remote_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    reminders: str = ""          # JSON array of trigger strings (Dida365 format)
+    repeat_flag: str = ""        # RRULE/ERULE string (Dida365) or repeatType (Zectrix)
 
 
 @dataclass

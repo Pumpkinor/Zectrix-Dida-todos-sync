@@ -86,6 +86,18 @@ async def init_db():
             await db.commit()
         except Exception:
             pass
+
+        try:
+            await db.execute("ALTER TABLE todos ADD COLUMN reminders TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass
+
+        try:
+            await db.execute("ALTER TABLE todos ADD COLUMN repeat_flag TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass
     finally:
         await db.close()
 

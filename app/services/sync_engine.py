@@ -71,35 +71,50 @@ async def run_sync():
             dida_task_id = getattr(todo, '_dida_task_id', None)
             dida_project_id = getattr(todo, '_dida_project_id', None)
 
-            cursor = await db.execute("SELECT uid, last_modified, synced, remote_id, completed FROM todos WHERE uid = ?", (todo.uid,))
-            existing = await cursor.fetchone()
+            existing = await _find_existing_source_todo(db, todo, dida_task_id)
 
             if existing is None:
                 await db.execute(
                     """INSERT INTO todos (uid, title, description, due_date, due_time, priority,
-                       completed, completed_at, ical_raw, last_modified, source, dida_task_id, dida_project_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dida', ?, ?)""",
+                       completed, completed_at, ical_raw, last_modified, source,
+                       dida_task_id, dida_project_id, reminders, repeat_flag)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dida', ?, ?, ?, ?)""",
                     (todo.uid, todo.title, todo.description, todo.due_date, todo.due_time,
                      todo.priority, int(todo.completed), todo.completed_at, todo.ical_raw,
-                     todo.last_modified, dida_task_id, dida_project_id),
+                     todo.last_modified, dida_task_id, dida_project_id,
+                     todo.reminders, todo.repeat_flag),
                 )
                 new_count += 1
                 logger.info(f"  NEW: uid={todo.uid}, title={todo.title}, completed={todo.completed}")
             elif _is_updated(existing, todo):
+                existing_uid = existing["uid"]
                 await db.execute(
                     """UPDATE todos SET title=?, description=?, due_date=?, due_time=?, priority=?,
                        completed=?, completed_at=?, ical_raw=?, last_modified=?,
                        synced=0, updated_at=datetime('now','localtime'),
                        dida_task_id=COALESCE(?, dida_task_id),
-                       dida_project_id=COALESCE(?, dida_project_id)
+                       dida_project_id=COALESCE(?, dida_project_id),
+                       reminders=?, repeat_flag=?,
+                       source=CASE WHEN ? IS NOT NULL THEN 'dida' ELSE source END
                        WHERE uid=?""",
                     (todo.title, todo.description, todo.due_date, todo.due_time, todo.priority,
                      int(todo.completed), todo.completed_at, todo.ical_raw, todo.last_modified,
-                     dida_task_id, dida_project_id, todo.uid),
+                     dida_task_id, dida_project_id, todo.reminders, todo.repeat_flag,
+                     dida_task_id, existing_uid),
                 )
                 updated_count += 1
-                logger.info(f"  UPDATED: uid={todo.uid}, title={todo.title}, completed={todo.completed}")
+                logger.info(f"  UPDATED: uid={existing_uid}, source_uid={todo.uid}, title={todo.title}, completed={todo.completed}")
             else:
+                if dida_task_id and _needs_dida_link_update(existing, dida_task_id, dida_project_id):
+                    await db.execute(
+                        """UPDATE todos SET
+                           dida_task_id=COALESCE(?, dida_task_id),
+                           dida_project_id=COALESCE(?, dida_project_id),
+                           source='dida',
+                           updated_at=datetime('now','localtime')
+                           WHERE uid=?""",
+                        (dida_task_id, dida_project_id, existing["uid"]),
+                    )
                 skipped_count += 1
         logger.info(f"[Step 2] DONE: {new_count} new, {updated_count} updated, {skipped_count} unchanged")
 
@@ -151,6 +166,9 @@ async def run_sync():
         sync_fail = 0
 
         if forwarder:
+            await _dedupe_dida_linked_todos(db, forwarder=forwarder)
+            await db.commit()
+
             cursor = await db.execute("SELECT * FROM todos WHERE synced = 0")
             unsynced = await cursor.fetchall()
             logger.info(f"  Found {len(unsynced)} unsynced todos")
@@ -162,8 +180,11 @@ async def run_sync():
                     title = row["title"]
                     source = row["source"] if "source" in row.keys() else "dida"
 
-                    # Skip zectrix-sourced todos
-                    if source == "zectrix":
+                    # Pure Zectrix-origin tasks should be handled by reverse sync. Once a
+                    # Dida task id exists, the row is linked and Dida-side edits must be
+                    # propagated back to the existing Zectrix todo.
+                    dida_task_id = row["dida_task_id"] if "dida_task_id" in row.keys() else None
+                    if source == "zectrix" and not dida_task_id:
                         logger.info(f"  SKIP (zectrix source): uid={row['uid']}, title={title}")
                         await db.execute(
                             "UPDATE todos SET synced=1, synced_at=datetime('now','localtime') WHERE uid=?",
@@ -236,11 +257,68 @@ async def run_sync():
         await db.close()
 
 
+async def _find_existing_source_todo(db, todo, dida_task_id: str | None):
+    """Find an existing local row for a Dida/iCal todo.
+
+    Dida tasks created from Zectrix keep their original zectrix-* uid locally.
+    Matching by dida_task_id prevents the next Dida fetch from creating a second
+    dida-* row for the same cross-linked task.
+    """
+    if dida_task_id:
+        cursor = await db.execute(
+            """SELECT * FROM todos
+               WHERE dida_task_id = ? OR uid = ?
+               ORDER BY
+                 CASE WHEN source = 'zectrix' AND remote_id IS NOT NULL THEN 0 ELSE 1 END,
+                 created_at ASC
+               LIMIT 1""",
+            (dida_task_id, todo.uid),
+        )
+        return await cursor.fetchone()
+
+    cursor = await db.execute("SELECT * FROM todos WHERE uid = ?", (todo.uid,))
+    return await cursor.fetchone()
+
+
+def _normalized(value) -> str:
+    return "" if value is None else str(value)
+
+
+def _row_field_changed(existing_row, remote_todo) -> bool:
+    fields = (
+        "title",
+        "description",
+        "due_date",
+        "due_time",
+        "priority",
+        "completed_at",
+        "reminders",
+    )
+    for field in fields:
+        if field in existing_row.keys() and _normalized(existing_row[field]) != _normalized(getattr(remote_todo, field, None)):
+            return True
+    if "repeat_flag" in existing_row.keys():
+        return _repeat_as_zectrix(existing_row["repeat_flag"]) != _repeat_as_zectrix(remote_todo.repeat_flag)
+    return False
+
+
+def _needs_dida_link_update(existing_row, dida_task_id: str | None, dida_project_id: str | None) -> bool:
+    if not dida_task_id:
+        return False
+    return (
+        existing_row["dida_task_id"] != dida_task_id
+        or (dida_project_id is not None and existing_row["dida_project_id"] != dida_project_id)
+        or existing_row["source"] != "dida"
+    )
+
+
 def _is_updated(existing_row, remote_todo) -> bool:
     if existing_row["synced"] == 0:
         return True
     # Detect completion status change
     if bool(existing_row["completed"]) != remote_todo.completed:
+        return True
+    if _row_field_changed(existing_row, remote_todo):
         return True
     existing_lm = existing_row["last_modified"]
     if existing_lm is None and remote_todo.last_modified is not None:
@@ -248,6 +326,123 @@ def _is_updated(existing_row, remote_todo) -> bool:
     if existing_lm is not None and remote_todo.last_modified is not None:
         return existing_lm != remote_todo.last_modified
     return False
+
+
+def _remote_field_changed(local_row, remote: dict) -> bool:
+    is_completed = remote.get("status") == 1 or remote.get("completed") is True
+    repeat_type = remote.get("repeatType", "none") or "none"
+    comparisons = (
+        ("title", remote.get("title", "")),
+        ("description", remote.get("description", "")),
+        ("due_date", remote.get("dueDate")),
+        ("due_time", remote.get("dueTime")),
+        ("priority", remote.get("priority", 0)),
+        ("completed", int(is_completed)),
+    )
+    for field, remote_value in comparisons:
+        if field in local_row.keys() and _normalized(local_row[field]) != _normalized(remote_value):
+            return True
+    if "repeat_flag" in local_row.keys():
+        return _repeat_as_zectrix(local_row["repeat_flag"]) != _repeat_as_zectrix(repeat_type)
+    return False
+
+
+def _repeat_as_zectrix(repeat_flag: str | None) -> str:
+    if not repeat_flag:
+        return "none"
+    value = str(repeat_flag).strip()
+    lower = value.lower()
+    if lower in {"none", "daily", "weekly", "monthly", "yearly"}:
+        return lower
+    upper = value.upper()
+    if "FREQ=DAILY" in upper:
+        return "daily"
+    if "FREQ=WEEKLY" in upper:
+        return "weekly"
+    if "FREQ=MONTHLY" in upper:
+        return "monthly"
+    if "FREQ=YEARLY" in upper:
+        return "yearly"
+    return "none"
+
+
+def _choose_canonical_dida_row(rows):
+    return sorted(
+        rows,
+        key=lambda row: (
+            0 if row["source"] == "zectrix" and row["remote_id"] else 1,
+            row["created_at"] or "",
+            row["uid"],
+        ),
+    )[0]
+
+
+async def _dedupe_dida_linked_todos(db, forwarder=None) -> int:
+    """Remove local duplicate rows that point at the same Dida task.
+
+    When a Zectrix-origin task is created on Dida, the local zectrix-* row gets a
+    dida_task_id. Older versions then created a second dida-* row for that same
+    task and forwarded it to Zectrix. This cleanup keeps the original linked row
+    and removes the extra local row. If a forwarder is available, the extra
+    Zectrix copy is deleted as well.
+    """
+    cursor = await db.execute(
+        """SELECT dida_task_id
+           FROM todos
+           WHERE dida_task_id IS NOT NULL AND dida_task_id != ''
+           GROUP BY dida_task_id
+           HAVING COUNT(*) > 1"""
+    )
+    duplicate_groups = await cursor.fetchall()
+    removed = 0
+
+    for group in duplicate_groups:
+        dida_task_id = group["dida_task_id"]
+        cursor = await db.execute(
+            "SELECT * FROM todos WHERE dida_task_id = ? ORDER BY created_at ASC",
+            (dida_task_id,),
+        )
+        rows = await cursor.fetchall()
+        if len(rows) < 2:
+            continue
+
+        keep = _choose_canonical_dida_row(rows)
+        keep_remote_id = keep["remote_id"]
+        for row in rows:
+            if row["uid"] == keep["uid"]:
+                continue
+
+            duplicate_remote_id = row["remote_id"]
+            if forwarder and duplicate_remote_id and duplicate_remote_id != keep_remote_id:
+                try:
+                    logger.info(
+                        "  DELETE duplicate Zectrix todo: dida_task_id=%s, uid=%s, remote_id=%s, keep_uid=%s",
+                        dida_task_id,
+                        row["uid"],
+                        duplicate_remote_id,
+                        keep["uid"],
+                    )
+                    await forwarder.delete_todo(duplicate_remote_id)
+                except Exception as e:
+                    logger.warning(
+                        "  Failed to delete duplicate Zectrix todo: remote_id=%s, error=%s",
+                        duplicate_remote_id,
+                        e,
+                    )
+                    continue
+
+            logger.info(
+                "  DELETE duplicate local todo: dida_task_id=%s, uid=%s, keep_uid=%s",
+                dida_task_id,
+                row["uid"],
+                keep["uid"],
+            )
+            await db.execute("DELETE FROM todos WHERE uid = ?", (row["uid"],))
+            removed += 1
+
+    if removed:
+        logger.info("  DEDUPED: removed %s duplicate local todo rows", removed)
+    return removed
 
 
 def _row_to_todo(row) -> dict:
@@ -261,6 +456,8 @@ def _row_to_todo(row) -> dict:
         priority=row["priority"] or 0,
         completed=bool(row["completed"]),
         completed_at=row["completed_at"],
+        reminders=row["reminders"] if "reminders" in row.keys() else "",
+        repeat_flag=row["repeat_flag"] if "repeat_flag" in row.keys() else "",
     )
 
 
@@ -287,7 +484,13 @@ async def run_reverse_sync(forwarder, db=None):
 
         # ── Phase 2: Match with local ──
         logger.info("  [Phase 2] Match with local DB...")
-        cursor = await db.execute("SELECT uid, remote_id, remote_updated_at, completed, source, dida_task_id, dida_project_id FROM todos WHERE remote_id IS NOT NULL")
+        cursor = await db.execute(
+            """SELECT uid, title, description, due_date, due_time, priority,
+                      remote_id, remote_updated_at, completed, source,
+                      dida_task_id, dida_project_id, repeat_flag
+               FROM todos
+               WHERE remote_id IS NOT NULL"""
+        )
         local_linked = await cursor.fetchall()
         local_remote_ids = {row["remote_id"] for row in local_linked}
 
@@ -309,13 +512,14 @@ async def run_reverse_sync(forwarder, db=None):
                 remote_update = str(remote.get("updateDate", "")) if remote.get("updateDate") is not None else ""
                 local_update = row["remote_updated_at"] or ""
 
-                if remote_update != local_update:
+                if remote_update != local_update or _remote_field_changed(row, remote):
                     is_completed = remote.get("status") == 1 or remote.get("completed") is True
+                    repeat_type = remote.get("repeatType", "none") or "none"
                     logger.info(f"    UPDATE: uid={row['uid']}, remote_id={rid}, title={remote.get('title')}, completed={is_completed}")
                     await db.execute(
                         """UPDATE todos SET title=?, description=?, due_date=?, due_time=?,
                            priority=?, completed=?, remote_updated_at=?,
-                           synced=1, updated_at=datetime('now','localtime')
+                           repeat_flag=?, synced=1, updated_at=datetime('now','localtime')
                            WHERE uid=?""",
                         (
                             remote.get("title", ""),
@@ -325,6 +529,7 @@ async def run_reverse_sync(forwarder, db=None):
                             remote.get("priority", 0),
                             int(is_completed),
                             remote_update,
+                            repeat_type,
                             row["uid"],
                         ),
                     )
@@ -353,13 +558,14 @@ async def run_reverse_sync(forwarder, db=None):
             remote = remote_map[rid]
             is_completed = remote.get("status") == 1 or remote.get("completed") is True
             remote_update = str(remote.get("updateDate", "")) if remote.get("updateDate") is not None else ""
+            repeat_type = remote.get("repeatType", "none") or "none"
             uid = f"zectrix-{rid}"
 
             logger.info(f"    IMPORT: uid={uid}, id={rid}, title={remote.get('title')}, due={remote.get('dueDate')}, status={remote.get('status')}")
             await db.execute(
                 """INSERT INTO todos (uid, title, description, due_date, due_time, priority,
-                   completed, remote_id, remote_updated_at, synced, ical_raw, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', 'zectrix')""",
+                   completed, remote_id, remote_updated_at, repeat_flag, synced, ical_raw, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', 'zectrix')""",
                 (
                     uid,
                     remote.get("title", ""),
@@ -370,6 +576,7 @@ async def run_reverse_sync(forwarder, db=None):
                     int(is_completed),
                     rid,
                     remote_update,
+                    repeat_type,
                 ),
             )
             created += 1
@@ -482,7 +689,7 @@ async def _reverse_create_to_dida(db) -> int:
     target_project = project_ids[0]
 
     cursor = await db.execute(
-        "SELECT uid, title, description, due_date, priority, completed FROM todos WHERE source = 'zectrix' AND dida_task_id IS NULL"
+        "SELECT uid, title, description, due_date, priority, completed, reminders, repeat_flag FROM todos WHERE source = 'zectrix' AND dida_task_id IS NULL"
     )
     zectrix_tasks = await cursor.fetchall()
     logger.info(f"    Found {len(zectrix_tasks)} Zectrix tasks without dida_task_id")
@@ -499,6 +706,8 @@ async def _reverse_create_to_dida(db) -> int:
                 content=row["description"] or "",
                 due_date=row["due_date"],
                 priority=row["priority"] or 0,
+                reminders=row["reminders"] if "reminders" in row.keys() else "",
+                repeat_flag=row["repeat_flag"] if "repeat_flag" in row.keys() else "",
             )
             # Parse the created task ID from MCP response
             import json

@@ -239,6 +239,11 @@ async def fetch_dida_tasks() -> list[Todo]:
         is_completed = status == 2
         due = t.get("dueDate")
 
+        # Serialize reminders and repeat as JSON strings for storage
+        reminders_raw = t.get("reminders")
+        reminders_str = json.dumps(reminders_raw, ensure_ascii=False) if reminders_raw else ""
+        repeat_str = t.get("repeatFlag") or ""
+
         todo = Todo(
             uid=f"dida-{t['id']}",
             title=t.get("title", ""),
@@ -250,6 +255,8 @@ async def fetch_dida_tasks() -> list[Todo]:
             completed_at=t.get("completedTime"),
             ical_raw="",
             last_modified=t.get("modifiedTime"),
+            reminders=reminders_str,
+            repeat_flag=repeat_str,
         )
         # Store original Dida365 IDs for reverse operations
         todo._dida_task_id = t["id"]
