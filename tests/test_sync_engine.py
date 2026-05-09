@@ -2,6 +2,8 @@ import unittest
 
 import aiosqlite
 
+from app.services.dida_client import DidaMCPClient, _format_dida_datetime
+from app.services.fetcher import _parse_dida_date, _parse_dida_time
 from app.models import Todo
 from app.services.sync_engine import (
     _dedupe_dida_linked_todos,
@@ -192,6 +194,33 @@ class SyncEngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(changed)
         finally:
             await db.close()
+
+    async def test_dida_datetime_parser_uses_task_timezone(self):
+        raw = "2026-05-08T16:00:00+0000"
+
+        self.assertEqual(_parse_dida_date(raw, "Asia/Shanghai"), "2026-05-09")
+        self.assertEqual(_parse_dida_time(raw, "Asia/Shanghai"), "00:00")
+
+    def test_dida_payload_formats_local_due_datetime(self):
+        client = DidaMCPClient("token")
+
+        payload = client._build_task_payload(
+            title="Task",
+            project_id="project-1",
+            content="content",
+            due_date="2026-05-09",
+            due_time="16:00",
+            priority=2,
+        )
+
+        self.assertEqual(payload["startDate"], "2026-05-09T16:00:00+0800")
+        self.assertEqual(payload["dueDate"], "2026-05-09T16:00:00+0800")
+        self.assertEqual(payload["timeZone"], "Asia/Shanghai")
+        self.assertFalse(payload["isAllDay"])
+        self.assertEqual(payload["priority"], 5)
+
+    def test_format_dida_datetime_all_day(self):
+        self.assertEqual(_format_dida_datetime("2026-05-09", None), "2026-05-09T00:00:00+0800")
 
 
 if __name__ == "__main__":

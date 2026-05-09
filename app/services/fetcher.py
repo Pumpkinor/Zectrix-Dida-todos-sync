@@ -2,13 +2,16 @@ import json
 import logging
 from datetime import datetime, date
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 from icalendar import Calendar
+from dateutil import parser as date_parser
 
 from app.models import Todo
 
 logger = logging.getLogger(__name__)
+DEFAULT_TIMEZONE = "Asia/Shanghai"
 
 PRIORITY_MAP = {1: 2, 2: 1, 3: 1, 4: 0, 5: 0}  # iCal 1(highest)-5(lowest) → 0/1/2
 
@@ -172,18 +175,40 @@ def _dida_priority_to_local(p: int) -> int:
     return {0: 0, 1: 1, 3: 1, 5: 2}.get(p, 0)
 
 
-def _parse_dida_date(d) -> str | None:
+def _parse_dida_datetime(d, timezone_name: str | None = None) -> datetime | None:
+    if not d:
+        return None
+    try:
+        dt = date_parser.isoparse(str(d))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt
+    try:
+        target_tz = ZoneInfo(timezone_name or DEFAULT_TIMEZONE)
+    except Exception:
+        target_tz = ZoneInfo(DEFAULT_TIMEZONE)
+    return dt.astimezone(target_tz)
+
+
+def _parse_dida_date(d, timezone_name: str | None = None) -> str | None:
     """Parse Dida365 date string to YYYY-MM-DD."""
     if not d:
         return None
+    dt = _parse_dida_datetime(d, timezone_name)
+    if dt:
+        return dt.strftime("%Y-%m-%d")
     s = str(d)
     return s[:10] if len(s) >= 10 else None
 
 
-def _parse_dida_time(d) -> str | None:
+def _parse_dida_time(d, timezone_name: str | None = None) -> str | None:
     """Parse Dida365 datetime string to HH:MM."""
     if not d:
         return None
+    dt = _parse_dida_datetime(d, timezone_name)
+    if dt:
+        return dt.strftime("%H:%M")
     s = str(d)
     if "T" in s and len(s) > 16:
         return s[11:16]
@@ -237,7 +262,8 @@ async def fetch_dida_tasks() -> list[Todo]:
     for t in raw_tasks:
         status = t.get("status", 0)
         is_completed = status == 2
-        due = t.get("dueDate")
+        due = t.get("dueDate") or t.get("startDate")
+        timezone_name = t.get("timeZone") or DEFAULT_TIMEZONE
 
         # Serialize reminders and repeat as JSON strings for storage
         reminders_raw = t.get("reminders")
@@ -248,8 +274,8 @@ async def fetch_dida_tasks() -> list[Todo]:
             uid=f"dida-{t['id']}",
             title=t.get("title", ""),
             description=t.get("content", "") or t.get("desc", "") or "",
-            due_date=_parse_dida_date(due),
-            due_time=_parse_dida_time(due),
+            due_date=_parse_dida_date(due, timezone_name),
+            due_time=None if t.get("isAllDay") else _parse_dida_time(due, timezone_name),
             priority=_dida_priority_to_local(t.get("priority", 0)),
             completed=is_completed,
             completed_at=t.get("completedTime"),

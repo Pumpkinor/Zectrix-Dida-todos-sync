@@ -1,11 +1,14 @@
 import logging
 import json
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 MCP_URL = "https://mcp.dida365.com"
+DEFAULT_TIMEZONE = "Asia/Shanghai"
 
 
 class DidaMCPClient:
@@ -128,28 +131,67 @@ class DidaMCPClient:
             "task_id": task_id,
         })
 
-    async def create_task(self, title: str, project_id: str = None,
-                          content: str = "", due_date: str = None,
-                          priority: int = 0, reminders: str = "",
-                          repeat_flag: str = "") -> str:
-        task = {"title": title}
+    def _build_task_payload(self, title: str = None, project_id: str = None,
+                            content: str = "", due_date: str = None,
+                            due_time: str = None, priority: int = 0,
+                            reminders: str = "", repeat_flag: str = "") -> dict:
+        task = {}
+        if title is not None:
+            task["title"] = title
         if project_id:
             task["projectId"] = project_id
         if content:
             task["content"] = content
-        if due_date:
-            task["dueDate"] = due_date
-        if priority:
-            task["priority"] = priority
+        due_dt = _format_dida_datetime(due_date, due_time)
+        if due_dt:
+            task["startDate"] = due_dt
+            task["dueDate"] = due_dt
+            task["timeZone"] = DEFAULT_TIMEZONE
+            task["isAllDay"] = due_time is None
+        dida_priority = _local_priority_to_dida(priority)
+        if dida_priority:
+            task["priority"] = dida_priority
         if reminders:
-            import json
             try:
                 task["reminders"] = json.loads(reminders)
             except (json.JSONDecodeError, ValueError):
                 pass
-        if repeat_flag:
+        if repeat_flag and repeat_flag != "none":
             task["repeatFlag"] = repeat_flag
+        return task
+
+    async def create_task(self, title: str, project_id: str = None,
+                          content: str = "", due_date: str = None,
+                          due_time: str = None, priority: int = 0, reminders: str = "",
+                          repeat_flag: str = "") -> str:
+        task = self._build_task_payload(
+            title=title,
+            project_id=project_id,
+            content=content,
+            due_date=due_date,
+            due_time=due_time,
+            priority=priority,
+            reminders=reminders,
+            repeat_flag=repeat_flag,
+        )
         return await self._call_tool("create_task", {"task": task})
+
+    async def update_task(self, task_id: str, title: str = None, project_id: str = None,
+                          content: str = "", due_date: str = None,
+                          due_time: str = None, priority: int = 0,
+                          reminders: str = "", repeat_flag: str = "") -> str:
+        task = self._build_task_payload(
+            title=title,
+            project_id=project_id,
+            content=content,
+            due_date=due_date,
+            due_time=due_time,
+            priority=priority,
+            reminders=reminders,
+            repeat_flag=repeat_flag,
+        )
+        logger.info(f"MCP update_task: task={task_id}, keys={list(task.keys())}")
+        return await self._call_tool("update_task", {"task_id": task_id, "task": task})
 
     async def get_task(self, task_id: str) -> dict:
         text = await self._call_tool("get_task_by_id", {"task_id": task_id})
@@ -167,3 +209,24 @@ async def get_dida_mcp_client() -> DidaMCPClient | None:
     if not token:
         return None
     return DidaMCPClient(token)
+
+
+def _local_priority_to_dida(priority: int) -> int:
+    return {0: 0, 1: 3, 2: 5, 3: 5, 5: 5}.get(priority or 0, 0)
+
+
+def _format_dida_datetime(due_date: str | None, due_time: str | None) -> str | None:
+    if not due_date:
+        return None
+    hour = 0
+    minute = 0
+    if due_time:
+        parts = due_time.split(":")
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+    dt = datetime.combine(
+        datetime.strptime(due_date, "%Y-%m-%d").date(),
+        time(hour=hour, minute=minute),
+        tzinfo=ZoneInfo(DEFAULT_TIMEZONE),
+    )
+    return dt.strftime("%Y-%m-%dT%H:%M:%S%z")

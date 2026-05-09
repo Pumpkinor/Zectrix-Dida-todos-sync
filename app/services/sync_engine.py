@@ -366,6 +366,16 @@ def _repeat_as_zectrix(repeat_flag: str | None) -> str:
     return "none"
 
 
+def _zectrix_repeat_to_dida(repeat_type: str | None) -> str:
+    repeat_type = (repeat_type or "none").lower()
+    return {
+        "daily": "RRULE:FREQ=DAILY",
+        "weekly": "RRULE:FREQ=WEEKLY",
+        "monthly": "RRULE:FREQ=MONTHLY",
+        "yearly": "RRULE:FREQ=YEARLY",
+    }.get(repeat_type, "none")
+
+
 def _choose_canonical_dida_row(rows):
     return sorted(
         rows,
@@ -584,22 +594,26 @@ async def run_reverse_sync(forwarder, db=None):
         await db.commit()
         logger.info(f"  [Phase 4] DONE: {created} imported, db committed")
 
-        # ── Phase 5: Reverse sync completions to Dida365 ──
-        logger.info("  [Phase 5] Reverse sync completions to Dida365...")
+        # ── Phase 5: Reverse sync updates to Dida365 ──
+        logger.info("  [Phase 5] Reverse sync updates to Dida365...")
+        dida_updated = await _reverse_update_to_dida(db, local_linked, remote_map)
+        logger.info(f"  [Phase 5] DONE: {dida_updated} tasks updated on Dida365")
+
+        logger.info("  [Phase 6] Reverse sync completions to Dida365...")
         dida_completed = await _reverse_complete_to_dida(db, local_linked, remote_map)
-        logger.info(f"  [Phase 5] DONE: {dida_completed} tasks completed on Dida365")
+        logger.info(f"  [Phase 6] DONE: {dida_completed} tasks completed on Dida365")
 
-        # ── Phase 6: Create Zectrix-originated tasks on Dida365 ──
-        logger.info("  [Phase 6] Create Zectrix tasks on Dida365...")
+        # ── Phase 7: Create Zectrix-originated tasks on Dida365 ──
+        logger.info("  [Phase 7] Create Zectrix tasks on Dida365...")
         dida_created = await _reverse_create_to_dida(db)
-        logger.info(f"  [Phase 6] DONE: {dida_created} tasks created on Dida365")
+        logger.info(f"  [Phase 7] DONE: {dida_created} tasks created on Dida365")
 
-        logger.info(f"── Step 5 DONE: {updated} updated, {created} new, {deleted} deleted, {dida_completed} dida-completed, {dida_created} dida-created ──")
+        logger.info(f"── Step 5 DONE: {updated} updated, {created} new, {deleted} deleted, {dida_updated} dida-updated, {dida_completed} dida-completed, {dida_created} dida-created ──")
         await add_sync_log(
             "reverse_sync",
             "success",
-            f"Reverse sync: {updated} updated, {created} new, {deleted} deleted, {dida_completed} dida-completed, {dida_created} dida-created",
-            updated + created + deleted,
+            f"Reverse sync: {updated} updated, {created} new, {deleted} deleted, {dida_updated} dida-updated, {dida_completed} dida-completed, {dida_created} dida-created",
+            updated + created + deleted + dida_updated + dida_completed + dida_created,
         )
     except Exception as e:
         logger.error(f"── Step 5 FAILED: {e} ──", exc_info=True)
@@ -611,6 +625,67 @@ async def run_reverse_sync(forwarder, db=None):
     finally:
         if close_db:
             await db.close()
+
+
+async def _reverse_update_to_dida(db, local_linked, remote_map) -> int:
+    """Update existing Dida365 tasks when linked Zectrix fields changed."""
+    from app.services.dida_client import get_dida_mcp_client
+
+    reverse_mode = await get_config("reverse_sync_mode")
+    if reverse_mode != "mcp":
+        logger.info(f"    Reverse sync mode is '{reverse_mode}', skipping MCP update")
+        return 0
+
+    client = await get_dida_mcp_client()
+    if not client:
+        logger.info("    Dida MCP not configured, skipping reverse update")
+        return 0
+
+    try:
+        await client.initialize()
+    except Exception as e:
+        logger.warning(f"    Dida MCP init failed: {e}")
+        return 0
+
+    updated_count = 0
+    for row in local_linked:
+        rid = row["remote_id"]
+        if rid not in remote_map:
+            continue
+
+        dida_task_id = row["dida_task_id"] if "dida_task_id" in row.keys() else None
+        dida_project_id = row["dida_project_id"] if "dida_project_id" in row.keys() else None
+        if not dida_task_id:
+            continue
+
+        remote = remote_map[rid]
+        zectrix_completed = remote.get("status") == 1 or remote.get("completed") is True
+        if zectrix_completed or not _remote_field_changed(row, remote):
+            continue
+
+        try:
+            logger.info(
+                "    Updating Dida365 via MCP: task_id=%s, title=%s, due=%s %s",
+                dida_task_id,
+                remote.get("title"),
+                remote.get("dueDate"),
+                remote.get("dueTime"),
+            )
+            await client.update_task(
+                task_id=dida_task_id,
+                project_id=dida_project_id,
+                title=remote.get("title", ""),
+                content=remote.get("description", "") or "",
+                due_date=remote.get("dueDate"),
+                due_time=remote.get("dueTime"),
+                priority=remote.get("priority", 0),
+                repeat_flag=_zectrix_repeat_to_dida(remote.get("repeatType")),
+            )
+            updated_count += 1
+        except Exception as e:
+            logger.error(f"    Failed to update Dida365: task_id={dida_task_id}, error={e}")
+
+    return updated_count
 
 
 async def _reverse_complete_to_dida(db, local_linked, remote_map) -> int:
@@ -689,7 +764,7 @@ async def _reverse_create_to_dida(db) -> int:
     target_project = project_ids[0]
 
     cursor = await db.execute(
-        "SELECT uid, title, description, due_date, priority, completed, reminders, repeat_flag FROM todos WHERE source = 'zectrix' AND dida_task_id IS NULL"
+        "SELECT uid, title, description, due_date, due_time, priority, completed, reminders, repeat_flag FROM todos WHERE source = 'zectrix' AND dida_task_id IS NULL"
     )
     zectrix_tasks = await cursor.fetchall()
     logger.info(f"    Found {len(zectrix_tasks)} Zectrix tasks without dida_task_id")
@@ -705,6 +780,7 @@ async def _reverse_create_to_dida(db) -> int:
                 project_id=target_project,
                 content=row["description"] or "",
                 due_date=row["due_date"],
+                due_time=row["due_time"],
                 priority=row["priority"] or 0,
                 reminders=row["reminders"] if "reminders" in row.keys() else "",
                 repeat_flag=row["repeat_flag"] if "repeat_flag" in row.keys() else "",
